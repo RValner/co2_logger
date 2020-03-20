@@ -22,7 +22,7 @@
 #define F30_I2C_ADDR 0x7F // Default address of the CO2 sensor, 7bits shifted left.
 #define SD_CS_PIN 10      // Chip Select pin for SD card
 
-char log_file_name[14];
+char log_file_name[34];
 File log_file_handle;     // File handle for logged data
 RTC_DS1307 rtc;           // RTC communication object
 
@@ -34,7 +34,7 @@ char log_entry_timestamp[50];
  * Declare the functions
  */
 void initSDcard();
-void newField();
+int initLogFile();
 void logData(int& data);
 void getTime();
 void dataTime(uint16_t* date, uint16_t* time);
@@ -61,7 +61,11 @@ void setup()
   }
 
   Serial.println("RTC is operational");
-  newField();
+  
+  while (initLogFile())
+  {
+    delay(2000);
+  }
 }
 
 /* * * * * * * * * * * * * * * * * * * * * * * * 
@@ -117,7 +121,7 @@ void initSDcard(int timeout)
 }
 
 //-----------------------
-void newField()
+int initLogFile()
 {  
   initSDcard(3000);
   getTime();
@@ -130,24 +134,34 @@ void newField()
   
   // Field raw data (log) file name
   snprintf(log_file_name, sizeof(log_file_name)
-  , "%02d%02d%02d%02d.log"
-  , _month, _day, _hour, _min);
- 
+  , "co2_%02d%02d.log"
+  , _month, _day);
+
+  bool file_exists = SD.exists(log_file_name);
   log_file_handle = SD.open(log_file_name, FILE_WRITE);
   if (log_file_handle)
   {
-    //Serial.print("Writing to ");
-    //Serial.println(log_file_name); 
-    log_file_handle.println(log_entry_timestamp);
-    log_file_handle.println("CO2(ppm)\ttime"); 
-    log_file_handle.println();    
-    log_file_handle.close();
+    if (!file_exists)
+    {
+      Serial.println("Created new log file.");
+      log_file_handle.println(log_entry_timestamp);
+      log_file_handle.println("CO2(ppm)\ttime"); 
+      log_file_handle.println();    
+      log_file_handle.close();
+    }
+    else
+    {
+      Serial.println("Logging data to existing file.");
+    }
+
+    return 0;
   } 
   else 
   {
     // if the file didn't open, print an error:
     Serial.print("error opening file:");
     Serial.println(log_file_name);
+    return 1;
   }
 }
 
@@ -171,7 +185,7 @@ void logData(int& data)
   }    
   else
   {
-    initSDcard(3000);
+    initLogFile();
   }
 }
 
