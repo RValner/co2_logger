@@ -17,25 +17,76 @@
 
 #include <SD.h>
 #include <Wire.h>
+#include <LiquidCrystal.h>
 #include <RTClib.h>
+#include "co2_logger_state.h"
 
-#define F30_I2C_ADDR 0x7F // Default address of the CO2 sensor, 7bits shifted left.
-#define SD_CS_PIN 10      // Chip Select pin for SD card
+#define F30_I2C_ADDR 0x7F         // Default address of the CO2 sensor, 7bits shifted left.
+#define SD_CS_PIN 10              // Chip Select pin for SD card
+#define SD_CARD_INIT_TIMEOUT 2000
+#define SAMPLING_PERIOD 5000
 
-char log_file_name[34];
-File log_file_handle;     // File handle for logged data
-RTC_DS1307 rtc;           // RTC communication object
+/*
+ * Structure that represents the logger
+ */
+struct CO2Logger
+{
+  // Default constructor
+  CO2Logger()
+  {
+    rtc_state.setParentStatePointer(&system_state);
+    sd_card_state.setParentStatePointer(&system_state);
+    log_file_state.setParentStatePointer(&system_state);
+  }
 
-char daysOfTheWeek[7][12] = {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"};
+  Status::Status getSystemState()
+  {
+    return system_state.status;
+  }
+
+  Status::Status getRtcState()
+  {
+    return rtc_state.status;
+  }
+
+  Status::Status getSdCardState()
+  {
+    return sd_card_state.status;
+  }
+
+  Status::Status getLogFileState()
+  {
+    return log_file_state.status;
+  }
+
+  void setMessage(char* message_in)
+  {
+    // TODO: Make sure that the 'message_in' is not larger than 'message'
+    snprintf(message, sizeof(message), "%s", message_in);
+  }
+
+  State system_state;
+  State rtc_state;
+  State sd_card_state;
+  State log_file_state;
+  
+  char message[16];
+};
+
+CO2Logger co2_logger;
+char log_file_name[20];
+RTC_DS1307 rtc;                   // RTC communication object
+LiquidCrystal lcd(3, 4, 5, 6, 7, 8);
+
 int _year, _month, _day, _hour, _min, _sec ;
-char log_entry_timestamp[50]; 
+char log_entry_timestamp[20]; 
 
 /*
  * Declare the functions
  */
-void initSDcard();
-int initLogFile();
-void logData(int& data);
+bool initSdCard(unsigned int timeout);
+bool initLogFile();
+bool logData(int& data);
 void getTime();
 void dataTime(uint16_t* date, uint16_t* time);
 int readCO2();
@@ -47,25 +98,8 @@ void setup()
 {
   Serial.begin(9600);
   Wire.begin ();
-
-  while (!rtc.begin())
-  {
-    Serial.println("Couldn't find RTC");
-    delay(1000);
-  }
-
-  while (!rtc.isrunning())
-  {
-    Serial.println("RTC is NOT running!");
-    delay(1000);
-  }
-
-  Serial.println("RTC is operational");
-  
-  while (initLogFile())
-  {
-    delay(2000);
-  }
+  lcd.begin(16, 2);
+  co2_logger.system_state.setToInitialize();
 }
 
 /* * * * * * * * * * * * * * * * * * * * * * * * 
@@ -73,18 +107,151 @@ void setup()
  * * * * * * * * * * * * * * * * * * * * * * * */
 void loop()
 {
-  int co2Value = readCO2();
-  if (co2Value > 0)
+  /*
+   * Check the state machine
+   */
+  switch(co2_logger.getSystemState())
   {
-    Serial.print("CO2 Value: ");
-    Serial.println(co2Value);
-    logData(co2Value);
+    /* * * * * * * * * * * * * * *
+     * Initialize
+     * * * * * * * * * * * * * * */
+    case Status::INITIALIZE:
+    {
+      /*
+       * Initialize the Real Time Clock
+       */
+      if (co2_logger.getRtcState() != Status::WORKING)
+      {
+        // Start the RTC
+        if (!rtc.begin())
+        {
+          co2_logger.rtc_state.setToError();
+          co2_logger.setMessage("RTC NOT FOUND");
+          break; 
+        }
+
+        // Check if RTC is running
+        if (!rtc.isrunning())
+        {
+          co2_logger.rtc_state.setToError();
+          co2_logger.setMessage("RTC NOT RUNNING");
+          break;
+        }
+
+        co2_logger.rtc_state.setToWorking();
+        Serial.println("RTC is operational");
+      }
+
+      /*
+       * Initialize the SD card
+       */
+      if (co2_logger.getSdCardState() != Status::WORKING)
+      {
+        if (!initSdCard(SD_CARD_INIT_TIMEOUT))
+        {
+          co2_logger.sd_card_state.setToError();
+          co2_logger.setMessage("INSERT SD CARD");
+          break;
+        }
+
+        co2_logger.sd_card_state.setToWorking();
+        Serial.println("SD card is operational");
+      }
+
+      /*
+       * Initialize the log file card
+       */
+      if (co2_logger.getLogFileState() != Status::WORKING)
+      {
+        if (!initLogFile())
+        {
+          co2_logger.log_file_state.setToError();
+          co2_logger.setMessage("CAN'T OPEN FILE");
+          break;
+        }
+
+        co2_logger.log_file_state.setToWorking();
+        Serial.println("Log file has been initialized");
+      }
+
+      /*
+       * All components are operational, start logging
+       */
+      co2_logger.system_state.setToWorking();
+    }
+    break;
+
+    /* * * * * * * * * * * * * * *
+     * Working
+     * * * * * * * * * * * * * * */
+    case Status::WORKING:
+    {
+      int co2Value = readCO2();
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      
+      if (co2Value > 0)
+      { 
+        if (!logData(co2Value))
+        {
+          co2_logger.log_file_state.setToError();
+          co2_logger.setMessage("LOGGING ISSUE");
+          break;
+        }
+        else
+        {
+          Serial.print("CO2 Value: ");
+          Serial.println(co2Value);
+
+          // Create log entry time stamp
+          char current_timestamp[20];
+          snprintf(current_timestamp, sizeof(current_timestamp)
+          , "%04d-%02d-%02d %02d:%02d:%02d"
+          , _year, _month, _day, _hour, _min, _sec);
+          
+          lcd.print("CO2: ");
+          lcd.print(co2Value);
+          lcd.print(" ppm");
+          lcd.setCursor(0, 1);
+          lcd.print(current_timestamp);
+          
+          delay(SAMPLING_PERIOD);
+        }
+      }
+      else
+      {
+        lcd.print("NO CO2 SENSOR");
+        Serial.println("Checksum failed / Communication failure");
+        delay(100);
+      }
+    }
+    break;
+
+    /* * * * * * * * * * * * * * *
+     * Error
+     * * * * * * * * * * * * * * */
+    case Status::ERROR:
+    { 
+      // TODO: Print message to LCD diaplay
+      Serial.println(co2_logger.message);
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print(co2_logger.message);
+      co2_logger.system_state.setToInitialize();
+      delay(1000);
+    }
+    break;
+
+    /* * * * * * * * * * * * * * *
+     * Default
+     * * * * * * * * * * * * * * */
+    default:
+    {
+      // Got into an invalid state ... help
+      co2_logger.setMessage("I AM BROKEN");
+      // TODO: Print message to LCD diaplay
+    }
   }
-  else
-  {
-    Serial.println("Checksum failed / Communication failure");
-  }
-  delay(2000);
 }
 
 //-----------------------
@@ -109,21 +276,30 @@ void getTime()
 
 
 //-----------------------
-void initSDcard(int timeout)
+bool initSdCard(unsigned int timeout)
 { 
-  // TODO: Add timeout functionality
-  while (!SD.begin(SD_CS_PIN))
+  unsigned int start_time = millis();
+  unsigned int duration = 0;
+  bool sd_init_success = SD.begin(SD_CS_PIN);
+  
+  while ( (duration <= timeout) && !sd_init_success)
   {
-    Serial.println("SD card initialization failed!");
-    Serial.println("Insert CD card  ");
-    delay(2000);
+    sd_init_success = SD.begin(SD_CS_PIN);
+    duration = millis() - start_time;
   }
+  
+  return sd_init_success;
 }
 
 //-----------------------
-int initLogFile()
-{  
-  initSDcard(3000);
+bool initLogFile()
+{
+  if (!initSdCard(SD_CARD_INIT_TIMEOUT))
+  {
+    co2_logger.sd_card_state.setToError();
+    return false;  
+  }
+  
   getTime();
   SdFile::dateTimeCallback(dataTime);
   
@@ -138,7 +314,7 @@ int initLogFile()
   , _month, _day);
 
   bool file_exists = SD.exists(log_file_name);
-  log_file_handle = SD.open(log_file_name, FILE_WRITE);
+  File log_file_handle = SD.open(log_file_name, FILE_WRITE);
   if (log_file_handle)
   {
     if (!file_exists)
@@ -152,23 +328,24 @@ int initLogFile()
     else
     {
       Serial.println("Logging data to existing file.");
+      log_file_handle.close();
     }
-
-    return 0;
+    return true;
   } 
   else 
   {
     // if the file didn't open, print an error:
-    Serial.print("error opening file:");
+    Serial.print("error opening file: ");
     Serial.println(log_file_name);
-    return 1;
+    log_file_handle.close();
+    return false;
   }
 }
 
 //-----------------------
-void logData(int& data)
+bool logData(int& data)
 {
-  char lbuf[120];
+  char lbuf[20];
   char data_char_buf[8];  
   dtostrf(float(data), 4, 2, data_char_buf);
   
@@ -176,16 +353,18 @@ void logData(int& data)
   , "%s\t%02d:%02d:%02d"
   , data_char_buf
   , _hour, _min, _sec);      
-  
-  log_file_handle = SD.open(log_file_name, FILE_WRITE);
+
+  File log_file_handle = SD.open(log_file_name, FILE_WRITE);
   if (log_file_handle)
   {  
     log_file_handle.println(lbuf);
     log_file_handle.close(); 
+    return true;
   }    
   else
   {
-    initLogFile();
+    log_file_handle.close();
+    return false;
   }
 }
 
