@@ -74,12 +74,12 @@ struct CO2Logger
 };
 
 CO2Logger co2_logger;
-char log_file_name[20];
 RTC_DS1307 rtc;                   // RTC communication object
 LiquidCrystal lcd(3, 4, 5, 6, 7, 8);
 
 int _year, _month, _day, _hour, _min, _sec ;
-char log_entry_timestamp[20]; 
+char log_entry_timestamp[20];
+char log_file_name[20];
 
 /*
  * Declare the functions
@@ -352,7 +352,12 @@ bool logData(int& data)
   snprintf( lbuf, sizeof(lbuf)
   , "%s\t%02d:%02d:%02d"
   , data_char_buf
-  , _hour, _min, _sec);      
+  , _hour, _min, _sec);
+
+  // Field raw data (log) file name
+  snprintf(log_file_name, sizeof(log_file_name)
+  , "co2_%02d%02d.log"
+  , _month, _day);
 
   File log_file_handle = SD.open(log_file_name, FILE_WRITE);
   if (log_file_handle)
